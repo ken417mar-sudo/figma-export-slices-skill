@@ -1,0 +1,4 @@
+interface:
+  display_name: "Figma Export Slices"
+  short_description: "Download Figma slices (切图)"
+  default_prompt: "Export Figma slices using the bundled script. Accept slice IDs and output location, then run the export with env vars or CLI args."
