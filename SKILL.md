@@ -1,23 +1,42 @@
 ---
 name: figma-export-slices
-description: "Download/export Figma slices (切图) using the bundled export script. Use when asked to refresh slice assets, update slice IDs, or export Figma images for any project."
+description: "Download/export Figma slices (切图) using the bundled export script. Use when asked to refresh slice assets, auto-discover exportable layers, or export Figma images for any project."
 ---
 
 # Figma Slice Export
 
-## Quick start (env vars)
-1. Prepare a slices JSON file.
-2. Run the exporter with environment variables.
+## Quick start (auto-discover)
+If the Figma file already marks exportable layers (export settings), you can export them directly:
 
 ```bash
 FIGMA_TOKEN=xxxx \
 FIGMA_FILE_KEY=abcd1234 \
-FIGMA_SLICES_FILE=./slices.json \
 OUTPUT_DIR=./slices \
-node scripts/export-slices.mjs
+node scripts/export-slices.mjs --discover
 ```
 
-## Quick start (CLI args)
+## Quick start (name regex)
+Export nodes that match a naming rule:
+
+```bash
+FIGMA_TOKEN=xxxx \
+FIGMA_FILE_KEY=abcd1234 \
+OUTPUT_DIR=./slices \
+node scripts/export-slices.mjs --discover --name-regex "切图|icon"
+```
+
+Optionally limit to specific pages:
+
+```bash
+node scripts/export-slices.mjs \
+  --token xxxx \
+  --file abcd1234 \
+  --discover \
+  --page-regex "首页|主页面" \
+  --out ./slices
+```
+
+## Quick start (explicit slices)
 ```bash
 node scripts/export-slices.mjs \
   --token xxxx \
@@ -42,4 +61,5 @@ node scripts/export-slices.mjs \
 
 ## Notes
 - Provide slices via `--slices` (JSON string) or `--slices-file` (file path).
-- If the Figma file or slice list changes, update the file key or slices JSON.
+- If `--discover` is set without `--name-regex`, nodes with export settings are used.
+- If `--discover` is set with `--name-regex`, nodes matching the regex are used.
