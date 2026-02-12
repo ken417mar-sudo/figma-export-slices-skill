@@ -24,6 +24,7 @@ Options:
   --token         Figma personal access token (or set FIGMA_TOKEN)
   --token-stdin   Read token from stdin (or set FIGMA_TOKEN_STDIN=1)
   --file          Figma file key (or set FIGMA_FILE_KEY)
+  --node-id       Optional node id to limit discovery to this subtree (e.g. 604:2915 or 604-2915)
   --slices        JSON string with slices array (or set FIGMA_SLICES)
   --slices-file   Path to JSON file with slices array (or set FIGMA_SLICES_FILE)
   --discover      Auto-discover nodes to export from the Figma file
@@ -32,6 +33,8 @@ Options:
   --out           Output directory (or set OUTPUT_DIR). Default: ./slices
   --scales        Comma-separated export scales. Default: 2,3
   --format        png (default). Override with FIGMA_FORMAT
+  --no-english    Disable auto English naming (keep original names)
+  --name-map      Write name mapping JSON to this path (default: <out>/slices-name-map.json)
   --help          Show this message
 
 Slices JSON format:
@@ -43,6 +46,11 @@ Slices JSON format:
 Discovery rules:
   - If --discover is set and --name-regex is provided, export nodes whose names match the regex.
   - If --discover is set and no --name-regex is provided, export nodes with export settings.
+
+Naming:
+  - By default, slice names are auto-converted to English (e.g. 图标/查看/切图 -> icon-view-slice).
+  - Use --no-english to keep original names. The name mapping (original -> english, id, files) is
+    written to <out>/slices-name-map.json and printed as FIGMA_SLICES_NAME_MAP for the model.
 `;
 
 if (hasArg("--help")) {
@@ -53,6 +61,8 @@ if (hasArg("--help")) {
 const TOKEN_FROM_ARGS = getArg("--token");
 const TOKEN_STDIN = hasArg("--token-stdin") || process.env.FIGMA_TOKEN_STDIN === "1";
 const FILE_KEY = getArg("--file") || process.env.FIGMA_FILE_KEY;
+const NODE_ID_RAW = getArg("--node-id") || process.env.FIGMA_NODE_ID;
+const NODE_ID = NODE_ID_RAW ? String(NODE_ID_RAW).replace(/-/g, ":") : null;
 const SLICES_RAW = getArg("--slices") || process.env.FIGMA_SLICES;
 const SLICES_FILE = getArg("--slices-file") || process.env.FIGMA_SLICES_FILE;
 const DISCOVER = hasArg("--discover") || process.env.FIGMA_DISCOVER === "1";
@@ -61,6 +71,8 @@ const PAGE_REGEX_RAW = getArg("--page-regex") || process.env.FIGMA_PAGE_REGEX;
 const OUTPUT_DIR = getArg("--out") || process.env.OUTPUT_DIR || path.resolve(process.cwd(), "slices");
 const FORMAT = getArg("--format") || process.env.FIGMA_FORMAT || "png";
 const SCALES_RAW = getArg("--scales") || process.env.FIGMA_SCALES || "2,3";
+const USE_ENGLISH_NAMES = !hasArg("--no-english") && process.env.FIGMA_NO_ENGLISH !== "1";
+const NAME_MAP_PATH = getArg("--name-map") || process.env.FIGMA_NAME_MAP_PATH || null;
 
 const parseSlices = (json) => {
   const data = JSON.parse(json);
@@ -87,6 +99,58 @@ const parseScales = (raw) => {
     throw new Error("Invalid scales. Example: --scales 2,3");
   }
   return values;
+};
+
+// 常见设计/UI 中文 → 英文（用于切图文件名）
+const NAME_ZH_TO_EN = {
+  切图: "slice",
+  图标: "icon",
+  查看: "view",
+  发送: "send",
+  分析: "analyze",
+  跑数: "run",
+  导航: "nav",
+  设备状态: "device-status",
+  特色功能: "features",
+  安全防护: "security",
+  空间清理: "cleanup",
+  原厂驱动: "driver",
+  联想服务: "service",
+  软件商店: "store",
+  头像: "avatar",
+  工具栏: "toolbar",
+  下拉: "dropdown",
+  最小化: "minimize",
+  关闭: "close",
+  弹窗拦截: "popup-block",
+  查杀图标: "scan-icon",
+  隔离图标: "quarantine-icon",
+  信任图标: "trust-icon",
+  浏览器: "browser",
+  保护状态: "protection",
+  状态: "status",
+  图片: "image",
+  logo: "logo",
+  icon: "icon",
+  image: "image",
+};
+
+const toEnglishSegment = (segment) => {
+  const s = String(segment).trim();
+  if (!s) return "";
+  const en = NAME_ZH_TO_EN[s];
+  if (en) return en;
+  if (/^[a-zA-Z0-9_-]+$/.test(s)) return s.toLowerCase();
+  return s;
+};
+
+const toEnglishName = (rawName) => {
+  if (!rawName || !USE_ENGLISH_NAMES) return rawName;
+  const parts = String(rawName)
+    .split(/[-/\s]+/)
+    .map(toEnglishSegment)
+    .filter(Boolean);
+  return parts.join("-") || rawName;
 };
 
 const safeName = (name, fallback) => {
@@ -136,9 +200,6 @@ const downloadFile = async (url, targetPath) => {
 const discoverSlices = async (token) => {
   const nameRegex = parseRegex(NAME_REGEX_RAW);
   const pageRegex = parseRegex(PAGE_REGEX_RAW);
-  const file = await fetchJson(`https://api.figma.com/v1/files/${FILE_KEY}`, token);
-  const pages = file?.document?.children || [];
-  const targets = pageRegex ? pages.filter((page) => pageRegex.test(page.name || "")) : pages;
   const found = [];
 
   const shouldExport = (node) => {
@@ -157,7 +218,22 @@ const discoverSlices = async (token) => {
     }
   };
 
-  targets.forEach(walk);
+  if (NODE_ID) {
+    const nodesRes = await fetchJson(
+      `https://api.figma.com/v1/files/${FILE_KEY}/nodes?ids=${encodeURIComponent(NODE_ID)}`,
+      token
+    );
+    const nodeData = nodesRes?.nodes?.[NODE_ID];
+    if (!nodeData?.document) {
+      throw new Error(`Node ${NODE_ID} not found or not accessible.`);
+    }
+    walk(nodeData.document);
+  } else {
+    const file = await fetchJson(`https://api.figma.com/v1/files/${FILE_KEY}`, token);
+    const pages = file?.document?.children || [];
+    const targets = pageRegex ? pages.filter((page) => pageRegex.test(page.name || "")) : pages;
+    targets.forEach(walk);
+  }
 
   if (found.length === 0) {
     const rule = nameRegex ? `name regex '${NAME_REGEX_RAW}'` : "export settings";
@@ -167,9 +243,10 @@ const discoverSlices = async (token) => {
   const seen = new Map();
   return found.map((node) => {
     const fallback = `slice-${node.id.replace(/[:]/g, "-")}`;
-    const base = safeName(node.name, fallback);
+    const baseRaw = toEnglishName(node.name || "") || node.name || "";
+    const base = safeName(baseRaw, fallback);
     const unique = uniquify(seen, base);
-    return { id: node.id, name: unique };
+    return { id: node.id, name: unique, originalName: node.name || "" };
   });
 };
 
@@ -195,6 +272,7 @@ const validateSlices = (slices) => {
     if (!slice || typeof slice.id !== "string" || typeof slice.name !== "string") {
       throw new Error("Each slice must have string fields: id, name.");
     }
+    if (slice.originalName === undefined) slice.originalName = slice.name;
   }
 };
 
@@ -246,6 +324,17 @@ const main = async () => {
   for (const scale of scales) {
     await exportScale(token, slices, scale);
   }
+
+  const nameMap = slices.map((s) => ({
+    id: s.id,
+    original: s.originalName ?? s.name,
+    english: s.name,
+    files: scales.map((scale) => `${s.name}@${scale}x.${FORMAT}`),
+  }));
+  const mapPath = NAME_MAP_PATH || path.join(OUTPUT_DIR, "slices-name-map.json");
+  await fs.writeFile(mapPath, JSON.stringify(nameMap, null, 2), "utf8");
+  console.log(`Name map written to ${mapPath}`);
+  console.log("FIGMA_SLICES_NAME_MAP=" + JSON.stringify(JSON.stringify(nameMap)));
 };
 
 main().catch((err) => {
