@@ -10,7 +10,7 @@ If the Figma file already marks exportable layers (export settings), you can exp
 
 ```bash
 FIGMA_TOKEN=xxxx \
-FIGMA_FILE_KEY=abcd1234 \
+FIGMA_FILE_KEY=<FILE_KEY> \
 OUTPUT_DIR=./slices \
 node scripts/export-slices.mjs --discover
 ```
@@ -20,7 +20,7 @@ Export nodes that match a naming rule:
 
 ```bash
 FIGMA_TOKEN=xxxx \
-FIGMA_FILE_KEY=abcd1234 \
+FIGMA_FILE_KEY=<FILE_KEY> \
 OUTPUT_DIR=./slices \
 node scripts/export-slices.mjs --discover --name-regex "切图|icon"
 ```
@@ -30,7 +30,7 @@ Optionally limit to specific pages:
 ```bash
 node scripts/export-slices.mjs \
   --token xxxx \
-  --file abcd1234 \
+  --file <FILE_KEY> \
   --discover \
   --page-regex "首页|主页面" \
   --out ./slices
@@ -40,11 +40,23 @@ node scripts/export-slices.mjs \
 ```bash
 node scripts/export-slices.mjs \
   --token xxxx \
-  --file abcd1234 \
+  --file <FILE_KEY> \
   --slices-file ./slices.json \
   --out ./slices \
   --scales 2,3
 ```
+
+## Limit to a node (--node-id)
+Export only layers under a specific frame (get node id from Figma URL `node-id=604-2915`):
+
+```bash
+node scripts/export-slices.mjs --discover --node-id 604-2915 \
+  --name-regex '^icon' --format svg --file <FILE_KEY> --out ./slices
+```
+
+## English naming & name map for model
+- By default, layer names are auto-converted to English (e.g. 图标/切图 → icon-slice). Use `--no-english` to keep original names.
+- A mapping file `slices-name-map.json` is written to the output dir (and `FIGMA_SLICES_NAME_MAP` printed to stdout) with `id`, `original`, `english`, `files` for each slice.
 
 ## Slices JSON format
 ```json
