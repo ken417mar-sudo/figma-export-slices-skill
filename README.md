@@ -43,3 +43,14 @@ node scripts/export-slices.mjs --discover --node-id 604-2915 \
 ```
 
 更多选项与说明见 **SKILL.md** 或执行 `node scripts/export-slices.mjs --help`。
+
+## 自动英文命名与命名字段返回给模型
+
+- **自动英文命名**：发现的图层名会按内置词表转成英文再作为导出文件名（例如 `icon/导航/设备状态/切图` → `icon-nav-device-status-slice`）。使用 `--no-english` 可关闭，保留 Figma 原名。
+- **与 Figma 图层名做关联并返回给模型**：  
+  脚本会生成 **`slices-name-map.json`**（在输出目录下），每条记录包含：
+  - `id`：Figma 节点 id  
+  - `original`：Figma 图层原名  
+  - `english`：转成英文后的文件名（不含 @1x、扩展名）  
+  - `files`：实际导出的文件名列表（如 `["icon-nav-device-status-slice@1x.svg"]`）  
+  同时在 stdout 末尾会打印一行 **`FIGMA_SLICES_NAME_MAP=...`**（整份 name map 的 JSON 字符串），便于模型从输出中直接拿到「Figma 图层名 ↔ 英文切图名」的对应关系。
