@@ -75,3 +75,12 @@ node scripts/export-slices.mjs --discover --node-id 604-2915 \
 - Provide slices via `--slices` (JSON string) or `--slices-file` (file path).
 - If `--discover` is set without `--name-regex`, nodes with export settings are used.
 - If `--discover` is set with `--name-regex`, nodes matching the regex are used.
+- Icon resources should default to this export workflow. Prefer `svg` first,
+  and only fall back to raster when SVG is not viable for the source asset or
+  the target platform.
+- If an icon is composed from multiple vector sub-nodes, do not export a
+  single fragment. Inspect the component structure and export a complete icon
+  asset.
+- For monochrome icons that must react to theme or interaction color, preserve
+  the exported SVG geometry but convert stroke/fill to `currentColor` in code.
+  Multicolor or fixed-brand SVG assets should keep their authored colors.

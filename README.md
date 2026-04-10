@@ -44,6 +44,14 @@ node scripts/export-slices.mjs --discover --node-id 604-2915 \
 
 更多选项与说明见 **SKILL.md** 或执行 `node scripts/export-slices.mjs --help`。
 
+## 图标资源规则
+
+- 图标资源默认走这套切图流程，优先导出 **SVG**。
+- 只有当 SVG 不适合源资产，或目标平台不适合直接接 SVG 时，才降级为 PNG / WebP / 其他 raster 格式。
+- 如果一个图标由多个 vector 子节点组成，不要只导单个碎片；要先确认结构并导出完整图标。
+- 对需要跟随主题或交互状态变色的**单色图标**，保留导出的 SVG 几何，在代码中把 `stroke` / `fill` 映射为 `currentColor`。
+- 多色、品牌、固定色 SVG 保持原色，不强行改成 `currentColor`。
+
 ## 自动英文命名与命名字段返回给模型
 
 - **自动英文命名**：发现的图层名会按内置词表转成英文再作为导出文件名（例如 `icon/导航/设备状态/切图` → `icon-nav-device-status-slice`）。使用 `--no-english` 可关闭，保留 Figma 原名。
