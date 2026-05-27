@@ -68,19 +68,24 @@ node scripts/export-slices.mjs --discover --node-id 604-2915 \
 
 ## Defaults
 - Output directory: `./slices`
-- Scales: `2,3`
-- Format: `png`
+- Format: `svg` (SVG-first; falls back to PNG automatically when Figma can only produce a raster asset)
+- Scales: `1` for SVG (resolution-independent), `2,3` for PNG/WebP
+
+## currentColor mode (--current-color)
+| Mode | Behaviour |
+|------|-----------|
+| `auto` *(default)* | Apply `currentColor` when the SVG uses **≤ 1** distinct non-transparent color (monochrome). Multi-color SVGs keep authored colors. |
+| `always` | Replace every `fill`/`stroke` with `currentColor` regardless of color count. |
+| `never` | Keep all authored colors — useful for brand logos or fixed-palette illustrations. |
 
 ## Notes
 - Provide slices via `--slices` (JSON string) or `--slices-file` (file path).
 - If `--discover` is set without `--name-regex`, nodes with export settings are used.
 - If `--discover` is set with `--name-regex`, nodes matching the regex are used.
-- Icon resources should default to this export workflow. Prefer `svg` first,
-  and only fall back to raster when SVG is not viable for the source asset or
-  the target platform.
-- If an icon is composed from multiple vector sub-nodes, do not export a
-  single fragment. Inspect the component structure and export a complete icon
-  asset.
-- For monochrome icons that must react to theme or interaction color, preserve
-  the exported SVG geometry but convert stroke/fill to `currentColor` in code.
-  Multicolor or fixed-brand SVG assets should keep their authored colors.
+
+### Icon export rules (enforced by the script)
+1. **SVG first** — `--format svg` is the default. Only use `--format png` / `--format webp` when SVG is genuinely not appropriate for the target platform.
+2. **Auto raster fallback** — If Figma can only produce an SVG that wraps a `<image>` bitmap (e.g. the source layer is a rasterised photo), the script automatically re-exports the node as PNG @2x and logs a warning. Disable with `--no-svg-fallback`.
+3. **Complete icon export** — During discovery, if a matched node is a bare VECTOR / ELLIPSE / BOOLEAN_OPERATION leaf it is automatically promoted to its nearest parent COMPONENT / FRAME / GROUP so the exported asset is the whole icon, not a single path fragment.
+4. **currentColor for monochrome icons** — In `auto` mode (default), the script checks each exported SVG for the number of distinct colors. Monochrome SVGs get all `fill` / `stroke` values replaced with `currentColor` so they follow theme / interaction state in code. Multi-color, brand, or fixed-palette SVGs are left untouched.
+5. **Multi-color SVGs keep authored colors** — Do not force `currentColor` on icons that intentionally use multiple colors (logos, illustrations, status badges). Use `--current-color=never` to override completely.

@@ -10,47 +10,54 @@ const getArg = (name) => {
   return args[idx + 1];
 };
 
-const HELP = `Figma slice exporter
+const HELP = `Figma slice exporter (SVG-first)
 
 Usage:
   node scripts/export-slices.mjs \\
     --token <FIGMA_TOKEN> \\
     --file <FIGMA_FILE_KEY> \\
     --slices-file <path/to/slices.json> \\
-    --out <output/dir> \\
-    --scales 2,3
+    --out <output/dir>
 
 Options:
-  --token         Figma personal access token (or set FIGMA_TOKEN)
-  --token-stdin   Read token from stdin (or set FIGMA_TOKEN_STDIN=1)
-  --file          Figma file key (or set FIGMA_FILE_KEY)
-  --node-id       Optional node id to limit discovery to this subtree (e.g. 604:2915 or 604-2915)
-  --slices        JSON string with slices array (or set FIGMA_SLICES)
-  --slices-file   Path to JSON file with slices array (or set FIGMA_SLICES_FILE)
-  --discover      Auto-discover nodes to export from the Figma file
-  --name-regex    Regex for node names to export (or set FIGMA_NAME_REGEX)
-  --page-regex    Regex for page names to scan (or set FIGMA_PAGE_REGEX)
-  --out           Output directory (or set OUTPUT_DIR). Default: ./slices
-  --scales        Comma-separated export scales. Default: 2,3
-  --format        png (default). Override with FIGMA_FORMAT
-  --no-english    Disable auto English naming (keep original names)
-  --name-map      Write name mapping JSON to this path (default: <out>/slices-name-map.json)
-  --help          Show this message
+  --token            Figma personal access token (or set FIGMA_TOKEN)
+  --token-stdin      Read token from stdin (or set FIGMA_TOKEN_STDIN=1)
+  --file             Figma file key (or set FIGMA_FILE_KEY)
+  --node-id          Optional node id to limit discovery to this subtree (e.g. 604:2915 or 604-2915)
+  --slices           JSON string with slices array (or set FIGMA_SLICES)
+  --slices-file      Path to JSON file with slices array (or set FIGMA_SLICES_FILE)
+  --discover         Auto-discover nodes to export from the Figma file
+  --name-regex       Regex for node names to export (or set FIGMA_NAME_REGEX)
+  --page-regex       Regex for page names to scan (or set FIGMA_PAGE_REGEX)
+  --out              Output directory (or set OUTPUT_DIR). Default: ./slices
+  --format           svg (default). Use png/webp to force raster. (or set FIGMA_FORMAT)
+  --scales           Comma-separated export scales. Default: 1 for SVG, 2,3 for raster
+  --no-svg-fallback  Disable auto PNG fallback when SVG contains a raster <image>
+  --current-color    currentColor mode: auto|always|never  (default: auto)
+                       auto   – apply if SVG is monochrome
+                       always – always apply (single-color theming)
+                       never  – keep all authored colors
+  --no-english       Disable auto English naming (keep original names)
+  --name-map         Write name mapping JSON to this path (default: <out>/slices-name-map.json)
+  --help             Show this message
+
+Icon export rules:
+  - SVG is the default format. Only fall back to raster when:
+      · The Figma node is raster-only (SVG contains <image>), OR
+      · You explicitly pass --format png/webp.
+  - If an icon is composed of multiple vector sub-nodes, the script walks UP
+    to the parent COMPONENT / COMPONENT_SET / GROUP / FRAME so the full icon
+    is exported — not just a single fragment.
+  - Monochrome icons (auto-detected, or --current-color=always): stroke/fill
+    are replaced with currentColor so the icon follows theme / interaction state.
+  - Multi-color, brand, or fixed-color SVGs keep their authored colors
+    (--current-color=never, or auto-detected as multi-color).
 
 Slices JSON format:
   [
     { "id": "123:456", "name": "logo" },
     { "id": "123:789", "name": "icon-home" }
   ]
-
-Discovery rules:
-  - If --discover is set and --name-regex is provided, export nodes whose names match the regex.
-  - If --discover is set and no --name-regex is provided, export nodes with export settings.
-
-Naming:
-  - By default, slice names are auto-converted to English (e.g. 图标/查看/切图 -> icon-view-slice).
-  - Use --no-english to keep original names. The name mapping (original -> english, id, files) is
-    written to <out>/slices-name-map.json and printed as FIGMA_SLICES_NAME_MAP for the model.
 `;
 
 if (hasArg("--help")) {
@@ -69,37 +76,97 @@ const DISCOVER = hasArg("--discover") || process.env.FIGMA_DISCOVER === "1";
 const NAME_REGEX_RAW = getArg("--name-regex") || process.env.FIGMA_NAME_REGEX;
 const PAGE_REGEX_RAW = getArg("--page-regex") || process.env.FIGMA_PAGE_REGEX;
 const OUTPUT_DIR = getArg("--out") || process.env.OUTPUT_DIR || path.resolve(process.cwd(), "slices");
-const FORMAT = getArg("--format") || process.env.FIGMA_FORMAT || "png";
-const SCALES_RAW = getArg("--scales") || process.env.FIGMA_SCALES || "2,3";
+// SVG is the default format; fall back to raster only when explicitly requested
+// or when the source asset is raster-only (detected automatically).
+const FORMAT = getArg("--format") || process.env.FIGMA_FORMAT || "svg";
+const SVG_MODE = FORMAT === "svg";
+// Scales: SVG is resolution-independent — default to 1x only.
+// For raster formats keep the classic 2x,3x default.
+const DEFAULT_SCALES = SVG_MODE ? "1" : "2,3";
+const SCALES_RAW = getArg("--scales") || process.env.FIGMA_SCALES || DEFAULT_SCALES;
+const NO_SVG_FALLBACK = hasArg("--no-svg-fallback") || process.env.FIGMA_NO_SVG_FALLBACK === "1";
+// currentColor mode: auto | always | never
+const CURRENT_COLOR_MODE =
+  getArg("--current-color") || process.env.FIGMA_CURRENT_COLOR_MODE || "auto";
 const USE_ENGLISH_NAMES = !hasArg("--no-english") && process.env.FIGMA_NO_ENGLISH !== "1";
 const NAME_MAP_PATH = getArg("--name-map") || process.env.FIGMA_NAME_MAP_PATH || null;
 
-const parseSlices = (json) => {
-  const data = JSON.parse(json);
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.slices)) return data.slices;
-  throw new Error("Invalid slices JSON. Expected array or { slices: [...] }.");
+// ---------------------------------------------------------------------------
+// SVG post-processing helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Return true when the SVG contains a bitmap <image> element, which means
+ * Figma could not produce a pure-vector export.  In this case the caller
+ * should re-export as PNG/WebP.
+ */
+const svgIsRaster = (svgText) => /<image\b/i.test(svgText);
+
+/**
+ * Collect every non-transparent fill/stroke color used in the SVG.
+ * Returns a Set of lower-cased color strings.
+ */
+const collectSvgColors = (svgText) => {
+  const colors = new Set();
+  const attrRe = /(?:fill|stroke)="([^"]+)"/g;
+  const styleRe = /(?:fill|stroke)\s*:\s*([^;}"'\s]+)/g;
+  for (const re of [attrRe, styleRe]) {
+    let m;
+    while ((m = re.exec(svgText)) !== null) {
+      const v = m[1].trim().toLowerCase();
+      if (v && v !== "none" && v !== "transparent" && !v.startsWith("url(")) {
+        // Normalise hex shorthand so #fff === #ffffff
+        colors.add(v.replace(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/i, "#$1$1$2$2$3$3"));
+      }
+    }
+  }
+  return colors;
 };
 
-const parseRegex = (raw) => {
-  if (!raw) return null;
-  try {
-    return new RegExp(raw);
-  } catch (err) {
-    throw new Error(`Invalid regex '${raw}': ${err.message}`);
-  }
+/**
+ * Return true when the SVG uses at most one distinct non-transparent color
+ * (monochrome — safe to replace with currentColor).
+ */
+const svgIsMonochrome = (svgText) => collectSvgColors(svgText).size <= 1;
+
+/**
+ * Replace all non-transparent fill/stroke values in the SVG with currentColor.
+ * Also removes any hardcoded color inside style="" blocks.
+ */
+const applyCurrentColor = (svgText) => {
+  return svgText
+    // Attribute form: fill="…" / stroke="…"
+    .replace(/\b(fill|stroke)="(?!none\b|transparent\b)([^"]+)"/g, '$1="currentColor"')
+    // Inline style form: fill:…; / stroke:…;
+    .replace(/\b(fill|stroke)\s*:\s*(?!none\b|transparent\b)[^;}"'\s]+/g, "$1:currentColor");
 };
 
-const parseScales = (raw) => {
-  const values = String(raw)
-    .split(",")
-    .map((value) => Number(value.trim()))
-    .filter((value) => Number.isFinite(value) && value > 0);
-  if (values.length === 0) {
-    throw new Error("Invalid scales. Example: --scales 2,3");
+/**
+ * Decide whether to apply currentColor and return the (possibly modified) SVG.
+ */
+const postProcessSvg = (svgText, sliceName) => {
+  if (CURRENT_COLOR_MODE === "never") return svgText;
+
+  const mono = svgIsMonochrome(svgText);
+
+  if (CURRENT_COLOR_MODE === "always" || (CURRENT_COLOR_MODE === "auto" && mono)) {
+    console.log(`  → currentColor applied (${mono ? "monochrome" : "forced"}: ${sliceName})`);
+    return applyCurrentColor(svgText);
   }
-  return values;
+
+  if (CURRENT_COLOR_MODE === "auto" && !mono) {
+    const colors = [...collectSvgColors(svgText)];
+    console.log(
+      `  → colors kept (multi-color [${colors.slice(0, 4).join(", ")}${colors.length > 4 ? ", …" : ""}]: ${sliceName})`
+    );
+  }
+
+  return svgText;
 };
+
+// ---------------------------------------------------------------------------
+// Naming helpers
+// ---------------------------------------------------------------------------
 
 // 常见设计/UI 中文 → 英文（用于切图文件名）
 const NAME_ZH_TO_EN = {
@@ -168,6 +235,61 @@ const uniquify = (names, base) => {
   return count === 1 ? base : `${base}-${count}`;
 };
 
+// ---------------------------------------------------------------------------
+// Vector-composition helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Node types that represent "atomic" vector shapes.
+ * If a discovered node is of one of these types it is likely a sub-fragment
+ * rather than a complete icon; the parent should be used instead.
+ */
+const VECTOR_LEAF_TYPES = new Set([
+  "VECTOR",
+  "LINE",
+  "ELLIPSE",
+  "STAR",
+  "POLYGON",
+  "BOOLEAN_OPERATION",
+]);
+
+/**
+ * Node types that are valid containers for a complete icon.
+ */
+const ICON_CONTAINER_TYPES = new Set([
+  "COMPONENT",
+  "COMPONENT_SET",
+  "FRAME",
+  "GROUP",
+  "INSTANCE",
+]);
+
+/**
+ * Given a node discovered by the name regex, walk UP through the `parentMap`
+ * to find the nearest ancestor that is an ICON_CONTAINER_TYPES node.
+ * Returns the promoted node (or the original if no promotion is needed).
+ */
+const promoteToContainer = (node, parentMap) => {
+  if (!VECTOR_LEAF_TYPES.has(node.type)) return node;
+  let current = node;
+  while (current) {
+    const parent = parentMap.get(current.id);
+    if (!parent) break;
+    if (ICON_CONTAINER_TYPES.has(parent.type)) {
+      console.log(
+        `  → promoted "${node.name}" (${node.type}) → "${parent.name}" (${parent.type})`
+      );
+      return parent;
+    }
+    current = parent;
+  }
+  return node; // no suitable container found; export as-is
+};
+
+// ---------------------------------------------------------------------------
+// Network helpers
+// ---------------------------------------------------------------------------
+
 const readStdin = async () => {
   const chunks = [];
   for await (const chunk of process.stdin) {
@@ -187,7 +309,18 @@ const fetchJson = async (url, token) => {
   return res.json();
 };
 
-const downloadFile = async (url, targetPath) => {
+const fetchText = async (url, token) => {
+  const res = await fetch(url, {
+    headers: token ? { "X-Figma-Token": token } : {},
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Figma API error ${res.status}: ${text}`);
+  }
+  return res.text();
+};
+
+const downloadBinary = async (url, targetPath) => {
   const res = await fetch(url);
   if (!res.ok) {
     const text = await res.text();
@@ -197,10 +330,36 @@ const downloadFile = async (url, targetPath) => {
   await fs.writeFile(targetPath, Buffer.from(arrayBuffer));
 };
 
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+const parseRegex = (raw) => {
+  if (!raw) return null;
+  try {
+    return new RegExp(raw);
+  } catch (err) {
+    throw new Error(`Invalid regex '${raw}': ${err.message}`);
+  }
+};
+
+const parseScales = (raw) => {
+  const values = String(raw)
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (values.length === 0) {
+    throw new Error("Invalid scales. Example: --scales 2,3");
+  }
+  return values;
+};
+
 const discoverSlices = async (token) => {
   const nameRegex = parseRegex(NAME_REGEX_RAW);
   const pageRegex = parseRegex(PAGE_REGEX_RAW);
   const found = [];
+  // parentMap: nodeId → parentNode (for vector-promotion)
+  const parentMap = new Map();
 
   const shouldExport = (node) => {
     if (node.type === "DOCUMENT" || node.type === "CANVAS") return false;
@@ -208,13 +367,14 @@ const discoverSlices = async (token) => {
     return Array.isArray(node.exportSettings) && node.exportSettings.length > 0;
   };
 
-  const walk = (node) => {
+  const walk = (node, parent) => {
     if (!node) return;
+    if (parent) parentMap.set(node.id, parent);
     if (shouldExport(node)) {
-      found.push({ id: node.id, name: node.name || "" });
+      found.push(node);
     }
     if (Array.isArray(node.children)) {
-      node.children.forEach(walk);
+      node.children.forEach((child) => walk(child, node));
     }
   };
 
@@ -227,12 +387,12 @@ const discoverSlices = async (token) => {
     if (!nodeData?.document) {
       throw new Error(`Node ${NODE_ID} not found or not accessible.`);
     }
-    walk(nodeData.document);
+    walk(nodeData.document, null);
   } else {
     const file = await fetchJson(`https://api.figma.com/v1/files/${FILE_KEY}`, token);
     const pages = file?.document?.children || [];
     const targets = pageRegex ? pages.filter((page) => pageRegex.test(page.name || "")) : pages;
-    targets.forEach(walk);
+    targets.forEach((page) => walk(page, null));
   }
 
   if (found.length === 0) {
@@ -240,14 +400,35 @@ const discoverSlices = async (token) => {
     throw new Error(`No nodes found using ${rule}.`);
   }
 
+  // Promote vector-leaf nodes to their parent containers so we always export
+  // a complete icon rather than a single sub-fragment.
   const seen = new Map();
-  return found.map((node) => {
+  const promoted = new Map(); // dedup by promoted node id
+  for (const node of found) {
+    const resolved = promoteToContainer(node, parentMap);
+    if (!promoted.has(resolved.id)) {
+      promoted.set(resolved.id, { node: resolved, originalName: node.name || "" });
+    }
+  }
+
+  return [...promoted.values()].map(({ node, originalName }) => {
     const fallback = `slice-${node.id.replace(/[:]/g, "-")}`;
     const baseRaw = toEnglishName(node.name || "") || node.name || "";
     const base = safeName(baseRaw, fallback);
     const unique = uniquify(seen, base);
-    return { id: node.id, name: unique, originalName: node.name || "" };
+    return { id: node.id, name: unique, originalName };
   });
+};
+
+// ---------------------------------------------------------------------------
+// Slice loading / validation
+// ---------------------------------------------------------------------------
+
+const parseSlices = (json) => {
+  const data = JSON.parse(json);
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.slices)) return data.slices;
+  throw new Error("Invalid slices JSON. Expected array or { slices: [...] }.");
 };
 
 const loadSlices = async (token) => {
@@ -276,34 +457,85 @@ const validateSlices = (slices) => {
   }
 };
 
-const exportScale = async (token, slices, scale) => {
-  const ids = slices.map((slice) => slice.id).join(",");
-  const url = `https://api.figma.com/v1/images/${FILE_KEY}?ids=${encodeURIComponent(ids)}&format=${FORMAT}&scale=${scale}`;
-  const data = await fetchJson(url, token);
-  if (data.err) {
-    throw new Error(data.err);
-  }
-  const images = data.images || {};
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
 
+/**
+ * Export one batch of slices at the given scale in `format`.
+ * Returns a map of sliceId → { url, format } for post-processing.
+ */
+const fetchImageUrls = async (token, slices, scale, format) => {
+  const ids = slices.map((s) => s.id).join(",");
+  const url = `https://api.figma.com/v1/images/${FILE_KEY}?ids=${encodeURIComponent(ids)}&format=${format}&scale=${scale}`;
+  const data = await fetchJson(url, token);
+  if (data.err) throw new Error(data.err);
+  return data.images || {};
+};
+
+/**
+ * Download one SVG slice, apply currentColor post-processing, and save.
+ * Returns the final format used ("svg" or fallback raster format).
+ */
+const downloadSvgSlice = async (token, slice, imageUrl, outDir) => {
+  const svgText = await fetchText(imageUrl);
+
+  // If the SVG wraps a raster <image>, fall back to PNG unless disabled.
+  if (!NO_SVG_FALLBACK && svgIsRaster(svgText)) {
+    console.warn(
+      `  ⚠ SVG for "${slice.name}" contains a bitmap — falling back to PNG.`
+    );
+    // Re-request as PNG
+    const fallbackUrls = await fetchImageUrls(token, [slice], 2, "png");
+    const fallbackUrl = fallbackUrls[slice.id];
+    if (fallbackUrl) {
+      const filename = `${slice.name}@2x.png`;
+      const outPath = path.join(outDir, filename);
+      await downloadBinary(fallbackUrl, outPath);
+      console.log(`  Saved ${filename} (PNG fallback)`);
+      return { format: "png", scales: [2], filename };
+    }
+    console.warn(`  ⚠ PNG fallback URL missing for "${slice.name}".`);
+    return null;
+  }
+
+  // Apply currentColor post-processing
+  const processed = postProcessSvg(svgText, slice.name);
+
+  const filename = `${slice.name}.svg`;
+  const outPath = path.join(outDir, filename);
+  await fs.writeFile(outPath, processed, "utf8");
+  console.log(`  Saved ${filename}`);
+  return { format: "svg", scales: [1], filename };
+};
+
+/**
+ * Export all slices for a given scale in raster format.
+ */
+const exportRasterScale = async (token, slices, scale, format, outDir) => {
+  const images = await fetchImageUrls(token, slices, scale, format);
   for (const slice of slices) {
     const imageUrl = images[slice.id];
     if (!imageUrl) {
-      console.warn(`Missing image URL for ${slice.id} (${slice.name}) at ${scale}x`);
+      console.warn(`  ⚠ Missing image URL for ${slice.id} (${slice.name}) at ${scale}x`);
       continue;
     }
-    const filename = `${slice.name}@${scale}x.${FORMAT}`;
-    const outPath = path.join(OUTPUT_DIR, filename);
-    await downloadFile(imageUrl, outPath);
-    console.log(`Saved ${filename}`);
+    const filename = `${slice.name}@${scale}x.${format}`;
+    const outPath = path.join(outDir, filename);
+    await downloadBinary(imageUrl, outPath);
+    console.log(`  Saved ${filename}`);
   }
 };
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 const main = async () => {
   let token = TOKEN_FROM_ARGS || process.env.FIGMA_TOKEN;
   if (!token && TOKEN_STDIN) {
     token = await readStdin();
   }
-
   if (!token) {
     console.error("Missing FIGMA_TOKEN. Use --token, --token-stdin, or set FIGMA_TOKEN.");
     console.log(HELP);
@@ -318,22 +550,52 @@ const main = async () => {
   const slices = await loadSlices(token);
   validateSlices(slices);
 
-  const scales = parseScales(SCALES_RAW);
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-  for (const scale of scales) {
-    await exportScale(token, slices, scale);
+  // Track final export metadata per slice for the name map.
+  const sliceResults = new Map(slices.map((s) => [s.id, { ...s, files: [], finalFormat: FORMAT }]));
+
+  if (SVG_MODE) {
+    // --- SVG-first path ---
+    console.log(`Exporting ${slices.length} slice(s) as SVG…`);
+    const images = await fetchImageUrls(token, slices, 1, "svg");
+
+    for (const slice of slices) {
+      const imageUrl = images[slice.id];
+      if (!imageUrl) {
+        console.warn(`  ⚠ Missing SVG URL for ${slice.id} (${slice.name})`);
+        continue;
+      }
+      const result = await downloadSvgSlice(token, slice, imageUrl, OUTPUT_DIR);
+      if (!result) continue;
+      const entry = sliceResults.get(slice.id);
+      entry.files.push(result.filename);
+      entry.finalFormat = result.format;
+    }
+  } else {
+    // --- Explicit raster path ---
+    const scales = parseScales(SCALES_RAW);
+    console.log(`Exporting ${slices.length} slice(s) as ${FORMAT} @ ${scales.join(",")}x…`);
+    for (const scale of scales) {
+      await exportRasterScale(token, slices, scale, FORMAT, OUTPUT_DIR);
+      for (const slice of slices) {
+        const entry = sliceResults.get(slice.id);
+        entry.files.push(`${slice.name}@${scale}x.${FORMAT}`);
+      }
+    }
   }
 
-  const nameMap = slices.map((s) => ({
+  // Write name map
+  const nameMap = [...sliceResults.values()].map((s) => ({
     id: s.id,
     original: s.originalName ?? s.name,
     english: s.name,
-    files: scales.map((scale) => `${s.name}@${scale}x.${FORMAT}`),
+    format: s.finalFormat,
+    files: s.files,
   }));
   const mapPath = NAME_MAP_PATH || path.join(OUTPUT_DIR, "slices-name-map.json");
   await fs.writeFile(mapPath, JSON.stringify(nameMap, null, 2), "utf8");
-  console.log(`Name map written to ${mapPath}`);
+  console.log(`\nName map written to ${mapPath}`);
   console.log("FIGMA_SLICES_NAME_MAP=" + JSON.stringify(JSON.stringify(nameMap)));
 };
 
